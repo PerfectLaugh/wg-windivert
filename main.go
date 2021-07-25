@@ -30,16 +30,14 @@ type sendQueue struct {
 	mu             sync.Mutex
 	portMapping    map[uint16]*list.List
 	timer          *time.Timer
-	bufsize        int
 	handle         *divert.Handle
 	incomingPacket chan []byte
 }
 
-func newSendQueue(bufsize int, handle *divert.Handle, incomingPacket chan []byte) *sendQueue {
+func newSendQueue(handle *divert.Handle, incomingPacket chan []byte) *sendQueue {
 	q := &sendQueue{
 		portMapping:    make(map[uint16]*list.List),
 		timer:          time.NewTimer(0),
-		bufsize:        bufsize,
 		handle:         handle,
 		incomingPacket: incomingPacket,
 	}
@@ -324,7 +322,7 @@ func main() {
 
 	incomingPacket := make(chan []byte)
 
-	sender = newSendQueue(1000, handle, incomingPacket)
+	sender = newSendQueue(handle, incomingPacket)
 
 	iface, outip4, err := getOutboundIface("8.8.8.8:53")
 	if err != nil {
