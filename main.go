@@ -89,7 +89,7 @@ func (q *sendQueue) HasSeenPort(port uint16) bool {
 	return ok && l == nil
 }
 
-func (q *sendQueue) Push(port uint16, pkt sendElement) {
+func (q *sendQueue) Push(port uint16, pkt sendElement) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -98,8 +98,12 @@ func (q *sendQueue) Push(port uint16, pkt sendElement) {
 		q.portMapping[port] = list.New()
 		l = q.portMapping[port]
 	}
+	if l == nil {
+		return false
+	}
 
 	l.PushBack(pkt)
+	return true
 }
 
 func (q *sendQueue) PopAll() []sendElement {
@@ -247,11 +251,16 @@ func runInjectFilter(handle *divert.Handle) {
 
 		port := packet.SrcPort()
 		if !sender.HasSeenPort(port) {
-			sender.Push(port, sendElement{
+			result := sender.Push(port, sendElement{
 				pkt:  packet,
 				addr: address,
 			})
-			continue
+
+			if result {
+				continue
+			}
+
+			// we failed to push the packet. just send the packet as usual.
 		}
 
 		sender.CheckAndSendPacket(&packet, &address)
