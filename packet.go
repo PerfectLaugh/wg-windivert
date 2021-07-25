@@ -31,9 +31,15 @@ func (p *packetData) Parse() {
 
 	p.ipv6 = is_ipv6
 	if p.ipv6 {
-		p.pkt = gopacket.NewPacket(p.data, layers.LayerTypeIPv6, gopacket.NoCopy)
+		p.pkt = gopacket.NewPacket(p.data, layers.LayerTypeIPv6, gopacket.DecodeOptions{
+			Lazy:   true,
+			NoCopy: true,
+		})
 	} else {
-		p.pkt = gopacket.NewPacket(p.data, layers.LayerTypeIPv4, gopacket.NoCopy)
+		p.pkt = gopacket.NewPacket(p.data, layers.LayerTypeIPv4, gopacket.DecodeOptions{
+			Lazy:   true,
+			NoCopy: true,
+		})
 	}
 }
 
