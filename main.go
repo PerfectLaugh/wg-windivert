@@ -305,10 +305,10 @@ func runSocketFilter() {
 	}
 }
 
-var targetProcessName = flag.String("name", "", "Target Process Name")
-var privKey = flag.String("privkey", "", "Private Key")
-var publicKey = flag.String("pubkey", "", "Public Key")
-var endpoint = flag.String("endpoint", "", "Endpoint")
+var targetProcessName = flag.String("name", "", "Target Process Name(s)")
+var privKey = flag.String("privkey", "", "Client Private Key")
+var publicKey = flag.String("pubkey", "", "Server Public Key")
+var endpoint = flag.String("endpoint", "", "Server Endpoint")
 var internalIPv4 = flag.String("ipv4", "0.0.0.0", "Internal IPv4 in WireGuard")
 var internalIPv6 = flag.String("ipv6", "::", "Internal IPv6 in WireGuard")
 
