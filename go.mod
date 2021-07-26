@@ -1,4 +1,4 @@
-module wg-windivert
+module github.com/PerfectLaugh/wg-windivert
 
 go 1.16
 
