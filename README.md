@@ -19,7 +19,7 @@ Usage of wg-windivert.exe:
   -ipv6 string
         Internal IPv6 in WireGuard (default "::")
   -name string
-        Target Process Name(s)
+        Target Process Name(s), use '|' as seperator
   -privkey string
         Client Private Key
   -pubkey string
