@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"path"
 	"strings"
 )
 
@@ -60,9 +61,13 @@ func getOutboundIface(targetaddr string) (*net.Interface, net.IP, error) {
 }
 
 func compareProcessNames(target, compares string) bool {
-	comparesArr := strings.Split(compares, ",")
+	target = strings.ToLower(target)
+
+	comparesArr := strings.Split(compares, "|")
 	for _, compare := range comparesArr {
-		if target == compare {
+		compare = strings.ReplaceAll(compare, "\\", "/")
+		compare = strings.ToLower(compare)
+		if target == compare || path.Base(target) == compare {
 			return true
 		}
 	}

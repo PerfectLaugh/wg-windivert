@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"path"
 	"strings"
 	"sync"
 	"syscall"
@@ -299,13 +298,13 @@ func runSocketFilter() {
 		procPath = strings.ReplaceAll(procPath, "\\", "/")
 
 		if evt == divert.EventSocketBind {
-			if err == nil && compareProcessNames(path.Base(procPath), *targetProcessName) {
+			if err == nil && compareProcessNames(procPath, *targetProcessName) {
 				log.Println("bind:", socket.ProcessID, procPath, protocolStr, srcip, socket.LocalPort)
 				mapper.AddEndpoint(socket.Protocol, srcip, socket.LocalPort)
 			}
 			sender.Bind(socket.LocalPort)
 		} else if evt == divert.EventSocketClose {
-			if err == nil && compareProcessNames(path.Base(procPath), *targetProcessName) {
+			if err == nil && compareProcessNames(procPath, *targetProcessName) {
 				log.Println("close:", socket.ProcessID, procPath, protocolStr, srcip, socket.LocalPort)
 				mapper.RemoveEndpoint(socket.Protocol, srcip, socket.LocalPort)
 			}
@@ -314,7 +313,7 @@ func runSocketFilter() {
 	}
 }
 
-var targetProcessName = flag.String("name", "", "Target Process Name(s)")
+var targetProcessName = flag.String("name", "", "Target Process Name(s), use '|' as seperator")
 var privKey = flag.String("privkey", "", "Client Private Key")
 var publicKey = flag.String("pubkey", "", "Server Public Key")
 var endpoint = flag.String("endpoint", "", "Server Endpoint")
