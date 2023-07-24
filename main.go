@@ -20,128 +20,172 @@ import (
 
 var PRIORITY = 100
 
-type sendElement struct {
-	pkt  packetData
-	addr divert.Address
+var outboundIP net.IP
+var outboundIPv6 net.IP
+
+type sendAddress struct {
+	is_ipv6 bool
+	proto   uint8
+	port    uint16
 }
 
 type sendQueue struct {
 	mu             sync.Mutex
-	portMapping    map[uint16]*list.List
-	timer          *time.Timer
+	mapping        map[sendAddress]bool
+	pending        map[sendAddress]*list.List
+	pending_timer  map[sendAddress]*time.Timer
 	handle         *divert.Handle
 	incomingPacket chan []byte
 }
 
 func newSendQueue(handle *divert.Handle, incomingPacket chan []byte) *sendQueue {
 	q := &sendQueue{
-		portMapping:    make(map[uint16]*list.List),
-		timer:          time.NewTimer(0),
+		mapping:        make(map[sendAddress]bool),
+		pending:        make(map[sendAddress]*list.List),
+		pending_timer:  make(map[sendAddress]*time.Timer),
 		handle:         handle,
 		incomingPacket: incomingPacket,
 	}
-	<-q.timer.C
 	return q
 }
 
-func (q *sendQueue) Run() {
-	for {
-		var pkts []sendElement
+func (q *sendQueue) Lock() {
+	q.mu.Lock()
+}
 
-		q.timer.Reset(10 * time.Millisecond)
-		<-q.timer.C
+func (q *sendQueue) Unlock() {
+	q.mu.Unlock()
+}
 
-		pkts = q.PopAll()
-
-		for _, pkt := range pkts {
-			q.CheckAndSendPacket(&pkt.pkt, &pkt.addr)
-		}
+func (q *sendQueue) Bind(is_ipv6 bool, proto uint8, port uint16) {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
 	}
-}
 
-func (q *sendQueue) Bind(port uint16) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	l, ok := q.portMapping[port]
-	if ok && l != nil {
-		for l.Front() != nil {
-			pkt := l.Remove(l.Front()).(sendElement)
-			q.CheckAndSendPacket(&pkt.pkt, &pkt.addr)
-		}
-	}
-	q.portMapping[port] = nil
-}
-
-func (q *sendQueue) Close(port uint16) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	delete(q.portMapping, port)
-}
-
-func (q *sendQueue) HasSeenPort(port uint16) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	l, ok := q.portMapping[port]
-	return ok && l == nil
-}
-
-func (q *sendQueue) Push(port uint16, pkt sendElement) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	l, ok := q.portMapping[port]
+	_, ok := q.mapping[addr]
 	if !ok {
-		q.portMapping[port] = list.New()
-		l = q.portMapping[port]
+		q.mapping[addr] = true
 	}
-	if l == nil {
-		return false
-	}
-
-	l.PushBack(pkt)
-	return true
+	q.popQueue(is_ipv6, proto, port, true)
 }
 
-func (q *sendQueue) PopAll() []sendElement {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	pkts := make([]sendElement, 0)
-	for _, l := range q.portMapping {
-		if l == nil {
-			continue
-		}
-		for l.Front() != nil {
-			pkt := l.Remove(l.Front()).(sendElement)
-			pkts = append(pkts, pkt)
-		}
+func (q *sendQueue) BindOther(is_ipv6 bool, proto uint8, port uint16) {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
 	}
-	return pkts
+
+	_, ok := q.mapping[addr]
+	if !ok {
+		q.mapping[addr] = false
+	}
+	q.popQueue(is_ipv6, proto, port, false)
 }
 
-func (q *sendQueue) CheckAndSendPacket(pkt *packetData, address *divert.Address) {
-	proto := pkt.Protocol()
-	srcip := pkt.SrcIP()
-	srcport := pkt.SrcPort()
+func (q *sendQueue) popQueue(is_ipv6 bool, proto uint8, port uint16, interceptee bool) {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
+	}
 
-	if !hasLoopbackFlag(address.Flags) && proto != 0 {
-		if mapper.ShouldBeIntercepted(proto, srcip, srcport) {
-			if hasIPv6Flag(address.Flags) {
-				pkt.SetSrcIP(net.ParseIP(*internalIPv6))
+	l, ok := q.pending[addr]
+	if ok {
+		for c := l.Front(); c != nil; c = c.Next() {
+			pkt := c.Value.(sendElement)
+			if interceptee {
+				q.SendPacket(pkt.pkt, pkt.addr)
 			} else {
-				pkt.SetSrcIP(net.ParseIP(*internalIPv4))
+				q.handle.Send(pkt.pkt.data, pkt.addr)
 			}
-			data, err := pkt.Serialize()
-			if err != nil {
-				log.Println("could not serialize packet:", err)
-			}
-			q.incomingPacket <- data
-
-			return
 		}
+	}
+
+	delete(q.pending, addr)
+}
+
+func (q *sendQueue) Close(is_ipv6 bool, proto uint8, port uint16) {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
+	}
+
+	delete(q.mapping, addr)
+}
+
+func (q *sendQueue) EntryExists(is_ipv6 bool, proto uint8, port uint16) bool {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
+	}
+
+	_, ok := q.mapping[addr]
+	return ok
+}
+
+func (q *sendQueue) IsInterceptee(is_ipv6 bool, proto uint8, port uint16) bool {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
+	}
+
+	return q.mapping[addr]
+}
+
+func (q *sendQueue) QueuePacket(is_ipv6 bool, proto uint8, port uint16, pkt *packetData, address *divert.Address) {
+	addr := sendAddress{
+		is_ipv6: is_ipv6,
+		proto:   proto,
+		port:    port,
+	}
+
+	l, ok := q.pending[addr]
+	if !ok {
+		l = list.New()
+		q.pending[addr] = l
+	}
+
+	l.PushBack(sendElement{pkt, address})
+
+	if _, ok := q.pending_timer[addr]; !ok {
+		timer := time.NewTimer(10 * time.Millisecond)
+		q.pending_timer[addr] = timer
+		go func() {
+			defer timer.Stop()
+			<-timer.C
+
+			q.Lock()
+			defer q.Unlock()
+
+			if !q.EntryExists(is_ipv6, proto, port) {
+				q.BindOther(is_ipv6, proto, port)
+			}
+			delete(q.pending_timer, addr)
+		}()
+	}
+}
+
+func (q *sendQueue) SendPacket(pkt *packetData, address *divert.Address) {
+	if pkt.Protocol() != 0 {
+		if pkt.IPv6() {
+			pkt.SetSrcIP(net.ParseIP(*internalIPv6))
+		} else {
+			pkt.SetSrcIP(net.ParseIP(*internalIPv4))
+		}
+
+		data, err := pkt.Serialize()
+		if err != nil {
+			log.Fatal("could not serialize packet:", err)
+		}
+		q.incomingPacket <- data
+
+		return
 	}
 
 	if _, err := q.handle.Send(pkt.data, address); err != nil {
@@ -149,85 +193,11 @@ func (q *sendQueue) CheckAndSendPacket(pkt *packetData, address *divert.Address)
 	}
 }
 
-type endpointKey struct {
-	proto     uint8
-	localip   string
-	localport uint16
-	//remoteaddr [16]uint8
-	//remoteport uint16
+type sendElement struct {
+	pkt  *packetData
+	addr *divert.Address
 }
 
-type endpointValue struct {
-}
-
-type endpointMapper struct {
-	mu       sync.Mutex
-	localmap map[endpointKey]endpointValue
-}
-
-func newMapper() endpointMapper {
-	return endpointMapper{
-		localmap: make(map[endpointKey]endpointValue),
-	}
-}
-
-func (m *endpointMapper) GetLocalAddrMapping(proto uint8, localport uint16) (localip net.IP) {
-	for k := range m.localmap {
-		if k.localport == localport {
-			localip = net.IP(k.localip)
-			break
-		}
-	}
-
-	return
-}
-
-func (m *endpointMapper) ShouldBeIntercepted(proto uint8, localip net.IP, localport uint16) bool {
-	mapper.mu.Lock()
-	defer mapper.mu.Unlock()
-
-	for k := range m.localmap {
-		if k.proto != proto || k.localport != localport {
-			continue
-		}
-
-		ip := net.IP(k.localip)
-		if ip.IsUnspecified() {
-			return true
-		}
-		if ip.Equal(localip) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (m *endpointMapper) AddEndpoint(proto uint8, localip net.IP, localport uint16) {
-	mapper.mu.Lock()
-	defer mapper.mu.Unlock()
-
-	key := endpointKey{
-		proto:     proto,
-		localip:   string(localip.To16()),
-		localport: localport,
-	}
-	m.localmap[key] = endpointValue{}
-}
-
-func (m *endpointMapper) RemoveEndpoint(proto uint8, localip net.IP, localport uint16) {
-	mapper.mu.Lock()
-	defer mapper.mu.Unlock()
-
-	key := endpointKey{
-		proto:     proto,
-		localip:   string(localip.To16()),
-		localport: localport,
-	}
-	delete(m.localmap, key)
-}
-
-var mapper = newMapper()
 var sender *sendQueue
 
 func runInjectFilter(handle *divert.Handle) {
@@ -248,33 +218,33 @@ func runInjectFilter(handle *divert.Handle) {
 			continue
 		}
 
-		port := packet.SrcPort()
-		if !sender.HasSeenPort(port) {
-			result := sender.Push(port, sendElement{
-				pkt:  packet,
-				addr: address,
-			})
+		is_ipv6 := hasIPv6Flag(address.Flags)
+		srcport := packet.SrcPort()
+		protocol := packet.Protocol()
 
-			if result {
-				continue
-			}
+		sender.Lock()
 
-			// we failed to push the packet. just send the packet as usual.
+		if !sender.EntryExists(is_ipv6, protocol, srcport) {
+			sender.QueuePacket(is_ipv6, protocol, srcport, &packet, &address)
+		} else if sender.IsInterceptee(is_ipv6, protocol, srcport) {
+			sender.SendPacket(&packet, &address)
+		} else {
+			handle.Send(buf, &address)
 		}
 
-		sender.CheckAndSendPacket(&packet, &address)
+		sender.Unlock()
 	}
 }
 
 func runSocketFilter() {
-	handle, err := divert.Open("true", divert.LayerSocket, int16(PRIORITY+100), divert.FlagSniff|divert.FlagRecvOnly)
+	handle, err := divert.Open("outbound and not loopback", divert.LayerSocket, int16(PRIORITY+100), divert.FlagSniff|divert.FlagRecvOnly)
 	if err != nil {
 		log.Fatal("runSocketFilter error:", err)
 	}
 
 	buf := make([]byte, 65535)
+	var address divert.Address
 	for {
-		address := divert.Address{}
 		_, err := handle.Recv(buf, &address)
 		if err != nil {
 			log.Fatal(err)
@@ -283,8 +253,20 @@ func runSocketFilter() {
 		socket := address.Socket()
 		evt := address.Event()
 
-		ipv6 := hasIPv6Flag(address.Flags)
-		srcip := convertDivertAddressToNetIP(ipv6, socket.LocalAddress)
+		if evt != divert.EventSocketConnect && evt != divert.EventSocketClose {
+			continue
+		}
+
+		is_ipv6 := hasIPv6Flag(address.Flags)
+		srcip := convertDivertAddressToNetIP(is_ipv6, socket.LocalAddress)
+		if srcip.IsUnspecified() {
+			continue
+		}
+		if is_ipv6 && !outboundIPv6.Equal(srcip) {
+			continue
+		} else if !is_ipv6 && !outboundIP.Equal(srcip) {
+			continue
+		}
 
 		protocolStr := "unknown"
 		switch socket.Protocol {
@@ -297,25 +279,29 @@ func runSocketFilter() {
 		procPath, err := processPidToName(socket.ProcessID)
 		procPath = strings.ReplaceAll(procPath, "\\", "/")
 
-		if evt == divert.EventSocketBind {
+		sender.Lock()
+		if evt == divert.EventSocketConnect {
 			if err == nil && compareProcessNames(procPath, *targetProcessName) {
-				log.Println("bind:", socket.ProcessID, procPath, protocolStr, srcip, socket.LocalPort)
-				mapper.AddEndpoint(socket.Protocol, srcip, socket.LocalPort)
+				log.Println("bind:", is_ipv6, socket.ProcessID, procPath, protocolStr, srcip, socket.LocalPort)
+				sender.Bind(is_ipv6, socket.Protocol, socket.LocalPort)
+			} else {
+				sender.BindOther(is_ipv6, socket.Protocol, socket.LocalPort)
 			}
-			sender.Bind(socket.LocalPort)
 		} else if evt == divert.EventSocketClose {
 			if err == nil && compareProcessNames(procPath, *targetProcessName) {
-				log.Println("close:", socket.ProcessID, procPath, protocolStr, srcip, socket.LocalPort)
-				mapper.RemoveEndpoint(socket.Protocol, srcip, socket.LocalPort)
+				log.Println("close:", is_ipv6, socket.ProcessID, procPath, protocolStr, srcip, socket.LocalPort)
 			}
-			sender.Close(socket.LocalPort)
+			sender.Close(is_ipv6, socket.Protocol, socket.LocalPort)
 		}
+
+		sender.Unlock()
 	}
 }
 
 var targetProcessName = flag.String("name", "", "Target Process Name(s), use '|' as seperator")
 var privKey = flag.String("privkey", "", "Client Private Key")
 var publicKey = flag.String("pubkey", "", "Server Public Key")
+var psk = flag.String("psk", "", "Preshared Key")
 var endpoint = flag.String("endpoint", "", "Server Endpoint")
 var internalIPv4 = flag.String("ipv4", "0.0.0.0", "Internal IPv4 in WireGuard")
 var internalIPv6 = flag.String("ipv6", "::", "Internal IPv6 in WireGuard")
@@ -323,22 +309,23 @@ var internalIPv6 = flag.String("ipv6", "::", "Internal IPv6 in WireGuard")
 func main() {
 	flag.Parse()
 
-	handle, err := divert.Open("outbound", divert.LayerNetwork, int16(PRIORITY), divert.FlagDefault)
+	handle, err := divert.Open("outbound and not loopback", divert.LayerNetwork, int16(PRIORITY), divert.FlagDefault)
 	if err != nil {
 		log.Fatal("open divert handle error:", err)
 	}
 
 	incomingPacket := make(chan []byte)
 
-	sender = newSendQueue(handle, incomingPacket)
-
-	iface, outip4, err := getOutboundIface("8.8.8.8:53")
+	var iface *net.Interface
+	iface, outboundIP, err = getOutboundIface("8.8.8.8:53")
 	if err != nil {
 		log.Fatal("could not get outbound iface:", err)
 	}
-	_, outip6, _ := getOutboundIface("[2001:4860:4860::8888]:53")
+	_, outboundIPv6, _ = getOutboundIface("[2001:4860:4860::8888]:53")
 
-	t := newTun(1500, handle, incomingPacket, outip4, outip6, iface.Index)
+	sender = newSendQueue(handle, incomingPacket)
+
+	t := newTun(1500, handle, incomingPacket, iface.Index, outboundIP, outboundIPv6)
 	dev := device.NewDevice(t, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
 
 	privKeyBytes, err := base64.StdEncoding.DecodeString(*privKey)
@@ -357,10 +344,19 @@ func main() {
 	dev.IpcSet(fmt.Sprintf(`public_key=%s
 endpoint=%s
 allowed_ip=0.0.0.0/0
+allowed_ip=::/0
 `, pubKeyStr, *endpoint))
+	if *psk != "" {
+		pskBytes, err := base64.StdEncoding.DecodeString(*psk)
+		if err != nil {
+			log.Fatal("could not parse preshared key:", err)
+		}
+		pskStr := hex.EncodeToString(pskBytes)
+		dev.IpcSet(fmt.Sprintf("preshared_key=%s", pskStr))
+	}
+
 	dev.Up()
 
-	go sender.Run()
 	go runSocketFilter()
 	runInjectFilter(handle)
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Get preferred outbound ip of this machine
+// // Get preferred outbound ip of this machine
 func getOutboundIP(targetaddr string) (net.IP, error) {
 	conn, err := net.Dial("udp", targetaddr)
 	if err != nil {
@@ -80,9 +80,9 @@ func hasOutboundFlag(flags uint8) bool {
 }
 */
 
-func hasLoopbackFlag(flags uint8) bool {
-	return flags&(1<<2) != 0
-}
+// func hasLoopbackFlag(flags uint8) bool {
+// 	return flags&(1<<2) != 0
+// }
 
 func hasIPv6Flag(flags uint8) bool {
 	return flags&(1<<4) != 0

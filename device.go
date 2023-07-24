@@ -13,20 +13,20 @@ type netTun struct {
 	incomingPacket chan []byte
 	mtu            int
 	handle         *divert.Handle
-	outboundIPv4   net.IP
-	outboundIPv6   net.IP
 	ifceIdx        int
+	outboundIP     net.IP
+	outboundIPv6   net.IP
 }
 
-func newTun(mtu int, handle *divert.Handle, incomingPacket chan []byte, outboundIPv4, outboundIPv6 net.IP, ifceIdx int) *netTun {
+func newTun(mtu int, handle *divert.Handle, incomingPacket chan []byte, ifceIdx int, outboundIP, outboundIPv6 net.IP) *netTun {
 	t := &netTun{
 		events:         make(chan tun.Event, 10),
 		incomingPacket: incomingPacket,
 		mtu:            mtu,
 		handle:         handle,
-		outboundIPv4:   outboundIPv4,
-		outboundIPv6:   outboundIPv6,
 		ifceIdx:        ifceIdx,
+		outboundIP:     outboundIP,
+		outboundIPv6:   outboundIPv6,
 	}
 	t.events <- tun.EventUp
 	return t
@@ -40,49 +40,61 @@ func (tun *netTun) File() *os.File {
 	return nil
 }
 
-func (tun *netTun) Events() chan tun.Event {
+func (tun *netTun) Events() <-chan tun.Event {
 	return tun.events
 }
 
-func (tun *netTun) Read(buf []byte, offset int) (int, error) {
-	data, ok := <-tun.incomingPacket
-	if !ok {
-		return 0, os.ErrClosed
+func (tun *netTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	for i, buf := range bufs {
+		data, ok := <-tun.incomingPacket
+		if !ok {
+			return i, os.ErrClosed
+		}
+		copy(buf[offset:], data)
+		sizes[i] = len(data)
 	}
-	return copy(buf[offset:], data), nil
+
+	return len(bufs), nil
 }
 
-func (tun *netTun) Write(buf []byte, offset int) (int, error) {
-	packet := buf[offset:]
-	if len(packet) == 0 {
-		return 0, nil
+func (tun *netTun) Write(bufs [][]byte, offset int) (int, error) {
+	for i, buf := range bufs {
+		packet := buf[offset:]
+		if len(packet) == 0 {
+			continue
+		}
+
+		pkt := newPacket(packet)
+		is_ipv6 := pkt.IPv6()
+
+		var dstip net.IP
+		if is_ipv6 {
+			dstip = tun.outboundIPv6
+		} else {
+			dstip = tun.outboundIP
+		}
+
+		addr := divert.Address{}
+		addr.SetLayer(divert.LayerNetwork)
+		addr.SetEvent(divert.EventNetworkPacket)
+		addr.Network().InterfaceIndex = uint32(tun.ifceIdx)
+		addr.Network().SubInterfaceIndex = 0
+		setIPv6Flag(&addr.Flags, is_ipv6)
+		pkt.SetDstIP(dstip)
+
+		data, err := pkt.Serialize()
+		if err != nil {
+			return i, err
+		}
+
+		_, err = tun.handle.Send(data, &addr)
+		if err != nil {
+			return i, err
+		}
+		continue
 	}
 
-	version := packet[0] & 0x0f
-	ipv6 := version == 6
-
-	addr := divert.Address{}
-	addr.SetLayer(divert.LayerNetwork)
-	addr.SetEvent(divert.EventNetworkPacket)
-	addr.Network().InterfaceIndex = uint32(tun.ifceIdx)
-	addr.Network().SubInterfaceIndex = 0
-	setIPv6Flag(&addr.Flags, ipv6)
-
-	pkt := newPacket(packet)
-
-	if ipv6 {
-		pkt.SetDstIP(tun.outboundIPv6)
-	} else {
-		pkt.SetDstIP(tun.outboundIPv4)
-	}
-
-	data, err := pkt.Serialize()
-	if err != nil {
-		return 0, err
-	}
-
-	n, err := tun.handle.Send(data, &addr)
-	return int(n), err
+	return len(bufs), nil
 }
 
 func (tun *netTun) Flush() error {
@@ -101,4 +113,8 @@ func (tun *netTun) Close() error {
 
 func (tun *netTun) MTU() (int, error) {
 	return tun.mtu, nil
+}
+
+func (tun *netTun) BatchSize() int {
+	return 1
 }
